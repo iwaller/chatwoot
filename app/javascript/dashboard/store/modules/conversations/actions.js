@@ -8,9 +8,23 @@ import {
   buildConversationList,
   isOnMentionsView,
   isOnUnattendedView,
+  isOnFoldersView,
 } from './helpers/actionHelpers';
 import messageReadActions from './actions/messageReadActions';
 import messageTranslateActions from './actions/messageTranslateActions';
+
+export const hasMessageFailedWithExternalError = pendingMessage => {
+  // This helper is used to check if the message has failed with an external error.
+  // We have two cases
+  // 1. Messages that fail from the UI itself (due to large attachments or a failed network):
+  //    In this case, the message will have a status of failed but no external error. So we need to create that message again
+  // 2. Messages sent from Chatwoot but failed to deliver to the customer for some reason (user blocking or client system down):
+  //    In this case, the message will have a status of failed and an external error. So we need to retry that message
+  const { content_attributes: contentAttributes, status } = pendingMessage;
+  const externalError = contentAttributes?.external_error ?? '';
+  return status === MESSAGE_STATUS.FAILED && externalError !== '';
+};
+
 // actions
 const actions = {
   getConversation: async ({ commit }, conversationId) => {
@@ -23,9 +37,10 @@ const actions = {
     }
   },
 
-  fetchAllConversations: async ({ commit, dispatch }, params) => {
+  fetchAllConversations: async ({ commit, state, dispatch }) => {
     commit(types.SET_LIST_LOADING_STATUS);
     try {
+      const params = state.conversationFilters;
       const {
         data: { data },
       } = await ConversationApi.get(params);
@@ -242,12 +257,15 @@ const actions = {
   },
 
   sendMessageWithData: async ({ commit }, pendingMessage) => {
+    const { conversation_id: conversationId, id } = pendingMessage;
     try {
       commit(types.ADD_MESSAGE, {
         ...pendingMessage,
         status: MESSAGE_STATUS.PROGRESS,
       });
-      const response = await MessageApi.create(pendingMessage);
+      const response = hasMessageFailedWithExternalError(pendingMessage)
+        ? await MessageApi.retry(conversationId, id)
+        : await MessageApi.create(pendingMessage);
       commit(types.ADD_MESSAGE, {
         ...response.data,
         status: MESSAGE_STATUS.SENT,
@@ -305,12 +323,12 @@ const actions = {
       inbox_id: inboxId,
       meta: { sender },
     } = conversation;
-
     const hasAppliedFilters = !!appliedFilters.length;
     const isMatchingInboxFilter =
       !currentInbox || Number(currentInbox) === inboxId;
     if (
       !hasAppliedFilters &&
+      !isOnFoldersView(rootState) &&
       !isOnMentionsView(rootState) &&
       !isOnUnattendedView(rootState) &&
       isMatchingInboxFilter
@@ -429,6 +447,14 @@ const actions = {
     commit(types.CLEAR_CONVERSATION_FILTERS);
   },
 
+  setChatListFilters({ commit }, data) {
+    commit(types.SET_CHAT_LIST_FILTERS, data);
+  },
+
+  updateChatListFilters({ commit }, data) {
+    commit(types.UPDATE_CHAT_LIST_FILTERS, data);
+  },
+
   assignPriority: async ({ dispatch }, { conversationId, priority }) => {
     try {
       await ConversationApi.togglePriority({
@@ -447,6 +473,10 @@ const actions = {
 
   setCurrentChatPriority({ commit }, { priority, conversationId }) {
     commit(types.ASSIGN_PRIORITY, { priority, conversationId });
+  },
+
+  setContextMenuChatId({ commit }, chatId) {
+    commit(types.SET_CONTEXT_MENU_CHAT_ID, chatId);
   },
 
   ...messageReadActions,
